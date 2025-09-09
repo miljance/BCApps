@@ -794,6 +794,7 @@ codeunit 8060 "Create Billing Documents"
     begin
         CheckNoUpdateRequired(BillingLine);
         CheckOnlyOneServicePartnerType(BillingLine);
+        CheckMandatoryVariantCode(BillingLine);
     end;
 
     local procedure CheckOnlyOneServicePartnerType(var BillingLine: Record "Billing Line")
@@ -818,6 +819,18 @@ codeunit 8060 "Create Billing Documents"
         if not BillingLine.IsEmpty() then
             Error(UpdateRequiredErr);
         BillingLine.SetRange("Update Required");
+    end;
+
+    local procedure CheckMandatoryVariantCode(var BillingLine: Record "Billing Line")
+    var
+        Item: Record Item;
+        SubscriptionHeader: Record "Subscription Header";
+    begin
+        if SubscriptionHeader.Get(BillingLine."Subscription Header No.") then
+            if SubscriptionHeader.Type = SubscriptionHeader.Type::Item then
+                if Item.Get(SubscriptionHeader."Source No.") then
+                    if Item.IsVariantMandatory() then
+                        SubscriptionHeader.TestField("Variant Code");
     end;
 
     local procedure ProcessingFinishedMessage()
