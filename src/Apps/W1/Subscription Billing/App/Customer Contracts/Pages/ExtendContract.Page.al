@@ -180,13 +180,16 @@ page 8002 "Extend Contract"
                     begin
                         if ItemNo = '' then
                             Error(ItemNoEmptyErr);
-                        if VariantCode <> '' then
-                            ItemVariant.Get(ItemNo, VariantCode)
+                        if VariantCode <> '' then begin
+                            ItemVariant.SetLoadFields("Blocked");
+                            ItemVariant.Get(ItemNo, VariantCode);
+                            ItemVariant.TestField(Blocked, false);
+                        end;
                     end;
 
                     trigger OnLookup(var Text: Text): Boolean
                     begin
-                        LookupItemVariant();
+                        exit(LookupItemVariant(Text));
                     end;
                 }
                 field(AdditionalServiceCommitments; StrSubstNo(NoOfSelectedPackagesLbl, SelectedServiceCommitmentPackages, TotalServiceCommitmentPackage))
@@ -329,7 +332,7 @@ page 8002 "Extend Contract"
         if ProvisionStartDate = 0D then
             Error(ProvisionStartDateEmptyErr);
 
-        ServiceObject.InsertFromItemNoAndCustomerContract(ServiceObject, ItemNo, QuantityDecimal, ProvisionStartDate, CustomerContract);
+        ServiceObject.InsertFromItemNoAndCustomerContract(ServiceObject, ItemNo, VariantCode, QuantityDecimal, ProvisionStartDate, CustomerContract);
         ServiceObject.SetUnitPriceAndUnitCostFromExtendContract(UnitPrice, UnitCostLCY);
         ExtendContractMgt.ExtendContract(ServiceObject, TempServiceCommitmentPackage, ExtendCustomerContract, CustomerContract, ExtendVendorContract, VendorContract, false, SupplierReferenceEntryNo);
         ServiceObject.ResetCalledFromExtendContract();
@@ -632,13 +635,18 @@ page 8002 "Extend Contract"
         ExtendCustomerContractParam := NewExtendCustomerContract;
     end;
 
-    local procedure LookupItemVariant()
+    local procedure LookupItemVariant(var LookupResult: Text): Boolean
     var
         ItemVariant: Record "Item Variant";
     begin
+        if ItemNo = '' then
+            Error(ItemNoEmptyErr);
         ItemVariant.SetRange("Item No.", ItemNo);
-        if Page.RunModal(0, ItemVariant) = Action::LookupOK then
-            VariantCode := ItemVariant."Code";
+        ItemVariant.SetRange(Blocked, false);
+        if Page.RunModal(0, ItemVariant) = Action::LookupOK then begin
+            LookupResult := ItemVariant."Code";
+            exit(true);
+        end;
     end;
 
 
@@ -709,7 +717,7 @@ page 8002 "Extend Contract"
 
     protected var
         ItemNo: Code[20];
-        VariantCode: Code[20];
+        VariantCode: Code[10];
         QuantityDecimal: Decimal;
         ExtendCustomerContract: Boolean;
         ExtendVendorContract: Boolean;

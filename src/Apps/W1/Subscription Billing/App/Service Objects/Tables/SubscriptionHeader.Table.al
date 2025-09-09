@@ -401,6 +401,7 @@ table 8057 "Subscription Header"
                     if ServiceCommitmentsExist() then
                         Error(CannotChangeWhileServiceCommitmentExistsErr, FieldCaption(Type), ServiceCommitment.TableCaption);
                     "Source No." := '';
+                    "Variant Code" := '';
                     Description := '';
                     "Unit of Measure" := '';
                 end;
@@ -418,7 +419,6 @@ table 8057 "Subscription Header"
                 Item: Record Item;
                 GLAccount: Record "G/L Account";
                 ServiceCommitment: Record "Subscription Line";
-                ContractsItemManagement: Codeunit "Sub. Contracts Item Management";
             begin
                 if "Source No." <> xRec."Source No." then begin
                     if ServiceCommitmentsExist() then
@@ -433,7 +433,7 @@ table 8057 "Subscription Header"
                                     Error(EntityDoesNotExistErr, Item.TableCaption, "Source No.");
                                 if Item.Blocked or Item."Subscription Option" in ["Item Service Commitment Type"::"Sales without Service Commitment", "Item Service Commitment Type"::"Sales without Service Commitment"] then
                                     Error(ItemBlockedOrWithoutServiceCommitmentsErr, "Source No.");
-                                Description := ContractsItemManagement.GetItemTranslation("Source No.", '', "End-User Customer No.");
+                                Description := ContractsItemManagement.GetItemTranslation("Source No.", "Variant Code", "End-User Customer No.");
                                 Validate("Unit of Measure", Item."Sales Unit of Measure");
                                 if CurrFieldNo = FieldNo("Source No.") then
                                     InsertServiceCommitmentsFromStandardServCommPackages();
@@ -720,13 +720,23 @@ table 8057 "Subscription Header"
         field(96; "Variant Code"; Code[10])
         {
             Caption = 'Variant Code';
-            TableRelation = "Item Variant".Code where("Item No." = field("Source No."));
+            TableRelation = "Item Variant".Code where("Item No." = field("Source No."), Blocked = const(false));
+            ValidateTableRelation = false;
 
             trigger OnValidate()
+            var
+                ItemVariant: Record "Item Variant";
             begin
+                TestField(Type, Type::Item);
+                if Rec."Variant Code" <> '' then begin
+                    ItemVariant.SetLoadFields(Description, Blocked);
+                    ItemVariant.Get("Source No.", "Variant Code");
+                    ItemVariant.TestField(Blocked, false);
+                end;
                 Rec.ArchiveServiceCommitments();
                 if Rec."Variant Code" <> xRec."Variant Code" then
                     RecalculateServiceCommitments(FieldCaption("Variant Code"), true);
+                Description := ContractsItemManagement.GetItemTranslation("Source No.", "Variant Code", "End-User Customer No.");
             end;
         }
         field(107; "No. Series"; Code[20])
@@ -929,6 +939,7 @@ table 8057 "Subscription Header"
         Cust: Record Customer;
         PostCode: Record "Post Code";
         NoSeries: Codeunit "No. Series";
+        ContractsItemManagement: Codeunit "Sub. Contracts Item Management";
         ConfirmManagement: Codeunit "Confirm Management";
         Confirmed: Boolean;
         BilltoCustomerNoChanged: Boolean;
@@ -1756,7 +1767,6 @@ table 8057 "Subscription Header"
         ServiceCommitment: Record "Subscription Line";
         ServiceCommPackageLine: Record "Subscription Package Line";
         Item: Record Item;
-        ContractsItemManagement: Codeunit "Sub. Contracts Item Management";
     begin
         Item.Get("Source No.");
         if ServiceCommitmentPackage.FindSet() then
@@ -2081,10 +2091,9 @@ table 8057 "Subscription Header"
         SetRange("Source No.", ItemNo);
     end;
 
-    internal procedure InsertFromItemNoAndCustomerContract(var ServiceObject: Record "Subscription Header"; ItemNo: Code[20]; SourceQuantity: Decimal; ProvisionStartDate: Date; CustomerContract: Record "Customer Subscription Contract")
+    internal procedure InsertFromItemNoAndCustomerContract(var ServiceObject: Record "Subscription Header"; ItemNo: Code[20]; VariantCode: Code[10]; SourceQuantity: Decimal; ProvisionStartDate: Date; CustomerContract: Record "Customer Subscription Contract")
     var
         Item: Record Item;
-        ContractsItemManagement: Codeunit "Sub. Contracts Item Management";
     begin
         if ItemNo = '' then
             exit;
@@ -2093,7 +2102,8 @@ table 8057 "Subscription Header"
         ServiceObject.SetHideValidationDialog(true);
         ServiceObject.Type := ServiceObject.Type::Item;
         ServiceObject."Source No." := ItemNo;
-        ServiceObject.Description := ContractsItemManagement.GetItemTranslation(ItemNo, '', CustomerContract."Sell-to Customer No.");
+        ServiceObject."Variant Code" := VariantCode;
+        ServiceObject.Description := ContractsItemManagement.GetItemTranslation(ItemNo, VariantCode, CustomerContract."Sell-to Customer No.");
         ServiceObject."Unit of Measure" := Item."Base Unit of Measure";
         ServiceObject.Quantity := SourceQuantity;
         ServiceObject.Validate("End-User Customer No.", CustomerContract."Sell-to Customer No.");
