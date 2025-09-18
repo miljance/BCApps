@@ -1810,28 +1810,57 @@ table 8059 "Subscription Line"
         Periods: Integer;
         FollowUpPeriodDays: Integer;
     begin
+        // Determine billing period ratio
         BillingPeriodRatio := Rec.GetBillingPeriodRatio(BillingRhythm, Rec."Billing Base Period");
+
+        DeterminePeriodPriceCostAndFormula(BillingPeriodRatio, PeriodPrice, PeriodUnitCost, PeriodUnitCostLCY, PeriodFormula);
+
+        // Calculate how many full periods and follow up days fall within the billing period
+        CalculatePeriodCountAndDaysCount(PeriodFormula, ChargePeriodStart, ChargePeriodEnd, Periods, FollowUpDays, FollowUpPeriodDays);
+
+        // Calculate daily rates if there are follow up days
+        CalculateDailyRatesIfNeeded(PeriodPrice, PeriodUnitCost, PeriodUnitCostLCY, FollowUpPeriodDays, DayPrice, DayUnitCost, DayUnitCostLCY, BillingReferenceDateChanged);
+
+        // Calculate unit price and costs (full periods + follow up days)
+        UnitPrice := (PeriodPrice * Periods) + (DayPrice * FollowUpDays);
+        UnitCost := (PeriodUnitCost * Periods) + (DayUnitCost * FollowUpDays);
+        UnitCostLCY := (PeriodUnitCostLCY * Periods) + (DayUnitCostLCY * FollowUpDays);
+    end;
+
+    local procedure DeterminePeriodPriceCostAndFormula(BillingPeriodRatio: Decimal; var PeriodPrice: Decimal; var PeriodUnitCost: Decimal; var PeriodUnitCostLCY: Decimal; var PeriodFormula: DateFormula)
+    begin
         if BillingPeriodRatio > 1 then begin
+            // Use base period values when billing period is longer than base period
             PeriodPrice := Rec.Price;
             PeriodUnitCost := Rec."Unit Cost";
             PeriodUnitCostLCY := Rec."Unit Cost (LCY)";
             PeriodFormula := Rec."Billing Base Period";
         end else begin
+            // Prorate values when billing period is shorter than base period
             PeriodPrice := Rec.Price * BillingPeriodRatio;
             PeriodUnitCost := Rec."Unit Cost" * BillingPeriodRatio;
             PeriodUnitCostLCY := Rec."Unit Cost (LCY)" * BillingPeriodRatio;
             PeriodFormula := Rec."Billing Rhythm";
         end;
-        Rec.CalculatePeriodCountAndDaysCount(PeriodFormula, ChargePeriodStart, ChargePeriodEnd, Periods, FollowUpDays, FollowUpPeriodDays);
-        if FollowUpPeriodDays <> 0 then begin
-            DayPrice := PeriodPrice / FollowUpPeriodDays;
-            DayUnitCost := PeriodUnitCost / FollowUpPeriodDays;
-            DayUnitCostLCY := PeriodUnitCostLCY / FollowUpPeriodDays;
-            BillingReferenceDateChanged := true;
-        end;
-        UnitPrice := PeriodPrice * Periods + DayPrice * FollowUpDays;
-        UnitCost := PeriodUnitCost * Periods + DayUnitCost * FollowUpDays;
-        UnitCostLCY := PeriodUnitCostLCY * Periods + DayUnitCostLCY * FollowUpDays;
+    end;
+
+    local procedure CalculateDailyRatesIfNeeded(PeriodPrice: Decimal; PeriodUnitCost: Decimal; PeriodUnitCostLCY: Decimal; FollowUpPeriodDays: Integer; var DayPrice: Decimal; var DayUnitCost: Decimal; var DayUnitCostLCY: Decimal; var BillingReferenceDateChanged: Boolean
+                                                var DayUnitCost: Decimal; var DayUnitCostLCY: Decimal; var BillingReferenceDateChanged: Boolean)
+    begin
+        // Initialize daily rates to zero
+        DayPrice := 0;
+        DayUnitCost := 0;
+        DayUnitCostLCY := 0;
+        BillingReferenceDateChanged := false;
+
+        if FollowUpPeriodDays = 0 then
+            exit;
+
+        // Calculate daily rates for follow up days
+        DayPrice := PeriodPrice / FollowUpPeriodDays;
+        DayUnitCost := PeriodUnitCost / FollowUpPeriodDays;
+        DayUnitCostLCY := PeriodUnitCostLCY / FollowUpPeriodDays;
+        BillingReferenceDateChanged := true;
     end;
 
     internal procedure CalculatePeriodCountAndDaysCount(PeriodFormula: DateFormula; StartDate: Date; EndDate: Date; var Periods: Integer; var FollowUpDays: Integer; var FollowUpPeriodDays: Integer)
