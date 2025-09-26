@@ -14,20 +14,12 @@ codeunit 8060 "Create Billing Documents"
     trigger OnRun()
     var
         BillingLine: Record "Billing Line";
-        PartnerFilter: Text;
-        ShowNotification: Boolean;
     begin
         BillingLine.Copy(Rec);
-        PartnerFilter := BillingLine.GetFilter(Partner);
-        ShowNotification := PartnerFilter <> BillingLine.GetFilters();
-        BillingLine.Reset();
-        BillingLine.SetFilter(Partner, PartnerFilter);
         BillingLine.SetRange("Document Type", Enum::"Rec. Billing Document Type"::None);
         if CreateContractInvoice then
             BillingLine.SetRange("Billing Template Code", '');
         CreateBillingDocuments(BillingLine);
-        if ShowNotification and (not CreateContractInvoice) then
-            ShowFiltersIgnoredNotification();
     end;
 
     local procedure CreateBillingDocuments(var BillingLine: Record "Billing Line")
@@ -590,6 +582,7 @@ codeunit 8060 "Create Billing Documents"
         SalesHeader."Posting Description" := CustomerContractLbl + ' ' + CustomerContract."No.";
         TranslationHelper.RestoreGlobalLanguage();
         DocumentChangeManagement.SetSkipContractSalesHeaderModifyCheck(true);
+        SalesHeader."Auto Contract Billing" := AutoContractBilling;
         OnAfterCreateSalesHeaderFromContract(CustomerContract, SalesHeader);
         SalesHeader.Modify(false);
         if PostDocuments then begin
@@ -789,23 +782,26 @@ codeunit 8060 "Create Billing Documents"
         CreateVendorBillingDocs: Page "Create Vendor Billing Docs";
     begin
         if CustomerBillingLinesFound then begin
+            CreateCustomerBillingDocs.SetData(DocumentDate, PostingDate, CustomerRecurringBillingGrouping, PostDocuments);
             if CreateCustomerBillingDocs.RunModal() = Action::OK then begin
                 CreateCustomerBillingDocs.GetData(DocumentDate, PostingDate, CustomerRecurringBillingGrouping, PostDocuments);
                 exit(true);
             end;
-        end
-        else
-            if VendorBillingLinesFound then
+        end else
+            if VendorBillingLinesFound then begin
+                CreateVendorBillingDocs.SetData(DocumentDate, PostingDate, VendorRecurringBillingGrouping);
                 if CreateVendorBillingDocs.RunModal() = Action::OK then begin
                     CreateVendorBillingDocs.GetData(DocumentDate, PostingDate, VendorRecurringBillingGrouping);
                     exit(true);
                 end;
+            end;
     end;
 
     local procedure CheckBillingLines(var BillingLine: Record "Billing Line")
     begin
         CheckNoUpdateRequired(BillingLine);
         CheckOnlyOneServicePartnerType(BillingLine);
+        CheckServiceCommitmentDataConsistency(BillingLine);
     end;
 
     local procedure CheckOnlyOneServicePartnerType(var BillingLine: Record "Billing Line")
@@ -916,12 +912,24 @@ codeunit 8060 "Create Billing Documents"
         CreateContractInvoice := CreateContractInvoiceValue;
     end;
 
+    internal procedure SetAutoContractBilling(NewAutoContractBilling: Boolean)
+    begin
+        AutoContractBilling := NewAutoContractBilling;
+        SetHideProcessingFinishedMessage();
+        SetSkipRequestPageSelection(true);
+    end;
+
     procedure SetBillingGroupingPerContract(ServicePartner: Enum "Service Partner")
     begin
         if ServicePartner = "Service Partner"::Vendor then
             VendorRecurringBillingGrouping := "Vendor Rec. Billing Grouping"::Contract
         else
             CustomerRecurringBillingGrouping := "Customer Rec. Billing Grouping"::Contract;
+    end;
+
+    procedure SetCustomerRecurringBillingGrouping(NewCustomerRecurringBillingGrouping: Enum "Customer Rec. Billing Grouping")
+    begin
+        CustomerRecurringBillingGrouping := NewCustomerRecurringBillingGrouping;
     end;
 
     procedure GetBillingPeriodDescriptionTxt() DescriptionText: Text
@@ -1036,14 +1044,68 @@ codeunit 8060 "Create Billing Documents"
         OnAfterIsNewHeaderNeededPerContract(CreateNewHeader, TempBillingLine, PreviousSubContractNo);
     end;
 
-    local procedure ShowFiltersIgnoredNotification()
+    local procedure CheckServiceCommitmentDataConsistency(var BillingLine: Record "Billing Line")
     var
-        FiltersIgnoredNotification: Notification;
-        FiltersIgnoredMsg: Label 'You have set filters on the Recurring Billing page. The filters were ignored to maintain data consistency.';
+        CheckedServiceCommitments: List of [Text];
     begin
-        FiltersIgnoredNotification.Message(FiltersIgnoredMsg);
-        FiltersIgnoredNotification.Scope := NotificationScope::LocalScope;
-        FiltersIgnoredNotification.Send();
+        if BillingLine.FindSet() then
+            repeat
+                ValidateServiceCommitmentConsistency(BillingLine, CheckedServiceCommitments);
+            until BillingLine.Next() = 0;
+    end;
+
+    local procedure ValidateServiceCommitmentConsistency(var BillingLine: Record "Billing Line"; var CheckedServiceCommitments: List of [Text])
+    begin
+        if not CheckedServiceCommitments.Contains(Format(BillingLine."Subscription Line Entry No.")) then begin
+            CheckedServiceCommitments.Add(Format(BillingLine."Subscription Line Entry No."));
+            ValidateFilteredVsTotalBillingLineCount(BillingLine);
+        end;
+    end;
+
+    local procedure GetServiceCommitmentKey(ServiceObjectNo: Code[20]; ServiceCommitmentLineNo: Integer): Text
+    begin
+        exit(Format(ServiceObjectNo) + Format(ServiceCommitmentLineNo));
+    end;
+
+    local procedure ValidateFilteredVsTotalBillingLineCount(var BillingLine: Record "Billing Line")
+    var
+        FilteredCount: Integer;
+        TotalCount: Integer;
+    begin
+        FilteredCount := GetFilteredBillingLineCount(BillingLine);
+        TotalCount := GetTotalBillingLineCount(BillingLine);
+
+        if FilteredCount <> TotalCount then
+            ThrowSubscriptionLineConsistencyError(BillingLine."Subscription Header No.", BillingLine."Subscription Line Entry No.", FilteredCount, TotalCount);
+    end;
+
+    local procedure GetFilteredBillingLineCount(var BillingLine: Record "Billing Line"): Integer
+    var
+        FilteredBillingLine: Record "Billing Line";
+    begin
+        FilteredBillingLine.CopyFilters(BillingLine);
+        FilteredBillingLine.FilterGroup(2);
+        FilteredBillingLine.SetCurrentKey("Subscription Header No.", "Subscription Line Entry No.", "Billing to");
+        FilteredBillingLine.SetRange("Subscription Header No.", BillingLine."Subscription Header No.");
+        FilteredBillingLine.SetRange("Subscription Line Entry No.", BillingLine."Subscription Line Entry No.");
+        exit(FilteredBillingLine.Count());
+    end;
+
+    local procedure GetTotalBillingLineCount(var BillingLine: Record "Billing Line"): Integer
+    var
+        AllBillingLine: Record "Billing Line";
+    begin
+        AllBillingLine.SetCurrentKey("Subscription Header No.", "Subscription Line Entry No.", "Billing to");
+        AllBillingLine.SetRange("Subscription Header No.", BillingLine."Subscription Header No.");
+        AllBillingLine.SetRange("Subscription Line Entry No.", BillingLine."Subscription Line Entry No.");
+        exit(AllBillingLine.Count());
+    end;
+
+    local procedure ThrowSubscriptionLineConsistencyError(SubscriptionHeaderNo: Code[20]; SubscriptionLineEntryNo: Integer; FilteredCount: Integer; TotalCount: Integer)
+    var
+        ConsistencyErr: Label 'The number of filtered billing lines for Subscription Line %1 %2 (%3) does not match the total number of billing lines for this Subscription Line (%4). Adjust the page filters so that there are no gaps in the billing period.';
+    begin
+        Error(ConsistencyErr, SubscriptionHeaderNo, SubscriptionLineEntryNo, FilteredCount, TotalCount);
     end;
 
 
@@ -1232,4 +1294,5 @@ codeunit 8060 "Create Billing Documents"
         CreateContractInvoice: Boolean;
         ServiceContractSetupFetched: Boolean;
         CreateOnlyPurchaseInvoiceLines: Boolean;
+        AutoContractBilling: Boolean;
 }

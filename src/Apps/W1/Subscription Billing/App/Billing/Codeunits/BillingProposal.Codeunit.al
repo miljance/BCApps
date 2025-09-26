@@ -530,10 +530,14 @@ codeunit 8062 "Billing Proposal"
         BillingTemplate: Record "Billing Template";
         ClearBillingProposalOptionsTxt: Label 'All billing proposals, Only current billing template proposal';
         ClearBillingProposalQst: Label 'Which billing proposal(s) should be deleted?';
+        AutoContractBillingNotAllowedErr: Label 'You cannot clear the billing templates because you are not set up as an Auto Contract Billing user in the User Setup.';
         StrMenuResponse: Integer;
     begin
         StrMenuResponse := Dialog.StrMenu(ClearBillingProposalOptionsTxt, 1, ClearBillingProposalQst);
         BillingTemplate.Get(BillingTemplateCode);
+        if BillingTemplate.Automation <> BillingTemplate.Automation::None then
+            if not BillingTemplate.AutoContractBillingAllowed() then
+                Error(AutoContractBillingNotAllowedErr);
         case StrMenuResponse of
             0:
                 Error('');
@@ -544,6 +548,10 @@ codeunit 8062 "Billing Proposal"
                     BillingLine.SetRange(Partner, BillingTemplate.Partner);
                     if BillingLine.FindSet() then
                         repeat
+                            BillingTemplate.Get(BillingLine."Billing Template Code");
+                            if BillingTemplate.Automation <> BillingTemplate.Automation::None then
+                                if not BillingTemplate.AutoContractBillingAllowed() then
+                                    Error(AutoContractBillingNotAllowedErr);
                             BillingLine.Delete(true);
                         until BillingLine.Next() = 0;
                 end;
