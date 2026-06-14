@@ -254,8 +254,8 @@ codeunit 8060 "Create Billing Documents"
         end;
         SubContractsItemManagement.SetAllowInsertOfInvoicingItem(false);
         SalesLine.Validate("Unit of Measure Code", ServiceObject."Unit of Measure");
-        SalesLine.Validate(Quantity, TempBillingLine.GetSign() * ServiceObject.Quantity);
-        SalesLine.Validate("Unit Price", SalesLine.GetSalesDocumentSign() * TempBillingLine."Unit Price");
+        SalesLine.Validate(Quantity, TempBillingLine.GetSign(SalesLine."Document Type" = SalesLine."Document Type"::"Credit Memo") * ServiceObject.Quantity);
+        SalesLine.Validate("Unit Price", TempBillingLine."Unit Price");
         SalesLine.Validate("Line Discount %", TempBillingLine."Discount %");
         SalesLine.Validate("Unit Cost (LCY)", TempBillingLine."Unit Cost (LCY)");
         SalesLine."Recurring Billing from" := TempBillingLine."Billing from";
@@ -339,7 +339,7 @@ codeunit 8060 "Create Billing Documents"
         UsageDataBilling.SetRange(Quantity);
         UsageDataBilling.CalcSums(Amount);
         if SalesLine.Quantity <> 0 then
-            SalesLine.Validate("Unit Price", SalesLine.GetSalesDocumentSign() * UsageDataBilling.Amount / SalesLine.Quantity)
+            SalesLine.Validate("Unit Price", UsageDataBilling.Amount / SalesLine.Quantity)
         else
             SalesLine.Validate("Unit Price", UsageDataBilling."Unit Price");
         SalesLine.Validate("Line Discount %", ServiceCommitment."Discount %");
@@ -374,8 +374,8 @@ codeunit 8060 "Create Billing Documents"
         end;
         SubContractsItemManagement.SetAllowInsertOfInvoicingItem(false);
         PurchaseLine.Validate("Unit of Measure Code", ServiceObject."Unit of Measure");
-        PurchaseLine.Validate(Quantity, TempBillingLine.GetSign() * ServiceObject.Quantity);
-        PurchaseLine.Validate("Direct Unit Cost", PurchaseLine.GetPurchaseDocumentSign() * TempBillingLine."Unit Price");
+        PurchaseLine.Validate(Quantity, TempBillingLine.GetSign(PurchaseLine."Document Type" = PurchaseLine."Document Type"::"Credit Memo") * ServiceObject.Quantity);
+        PurchaseLine.Validate("Direct Unit Cost", TempBillingLine."Unit Price");
         PurchaseLine.Validate("Line Discount %", TempBillingLine."Discount %");
         PurchaseLine."Recurring Billing from" := TempBillingLine."Billing from";
         PurchaseLine."Recurring Billing to" := TempBillingLine."Billing to";
@@ -447,7 +447,7 @@ codeunit 8060 "Create Billing Documents"
         UsageDataBilling.SetRange(Quantity);
         UsageDataBilling.CalcSums("Cost Amount");
         if PurchLine.Quantity <> 0 then
-            PurchLine.Validate("Direct Unit Cost", PurchLine.GetPurchaseDocumentSign() * UsageDataBilling."Cost Amount" / PurchLine.Quantity)
+            PurchLine.Validate("Direct Unit Cost", UsageDataBilling."Cost Amount" / PurchLine.Quantity)
         else
             PurchLine.Validate("Direct Unit Cost", 0);
         PurchLine.Validate("Line Discount %", ServiceCommitment."Discount %");
