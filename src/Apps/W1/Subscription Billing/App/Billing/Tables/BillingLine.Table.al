@@ -485,11 +485,17 @@ table 8061 "Billing Line"
         exit(Rec.Partner = Rec.Partner::Vendor);
     end;
 
-    internal procedure GetSign(): Integer
+    internal procedure GetSign(IsCreditMemo: Boolean): Integer
     begin
-        if Rec.Discount then
+        if Rec.Discount then begin
+            if IsCreditMemo then
+                exit(1);
             exit(-1);
-        exit(1);
+        end else begin
+            if IsCreditMemo then
+                exit(-1);
+            exit(1);
+        end;
     end;
 
     internal procedure GetCorrectionDocumentNo(ServicePartner: Enum "Service Partner"; DocumentNo: Code[20]): Code[20]
