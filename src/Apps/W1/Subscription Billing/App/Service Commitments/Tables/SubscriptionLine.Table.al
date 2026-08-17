@@ -1892,6 +1892,19 @@ table 8059 "Subscription Line"
         UnitCostLCY := PeriodUnitCostLCY * Periods + DayUnitCostLCY * FollowUpDays;
     end;
 
+    internal procedure UnitAmountForChargePeriod(UnitAmountPerBillingPeriod: Decimal; BillingRhythm: DateFormula; ChargePeriodStart: Date; ChargePeriodEnd: Date) ChargePeriodAmount: Decimal
+    var
+        DayAmount: Decimal;
+        FollowUpDays: Integer;
+        Periods: Integer;
+        FollowUpPeriodDays: Integer;
+    begin
+        Rec.CalculatePeriodCountAndDaysCount(BillingRhythm, ChargePeriodStart, ChargePeriodEnd, Periods, FollowUpDays, FollowUpPeriodDays);
+        if FollowUpPeriodDays <> 0 then
+            DayAmount := UnitAmountPerBillingPeriod / FollowUpPeriodDays;
+        ChargePeriodAmount := UnitAmountPerBillingPeriod * Periods + DayAmount * FollowUpDays;
+    end;
+
     internal procedure CalculatePeriodCountAndDaysCount(PeriodFormula: DateFormula; StartDate: Date; EndDate: Date; var Periods: Integer; var FollowUpDays: Integer; var FollowUpPeriodDays: Integer)
     var
         LastDayInPreviousPeriod: Date;

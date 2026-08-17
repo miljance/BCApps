@@ -78,6 +78,8 @@ codeunit 148153 "Usage Based Billing Test"
         RRef: RecordRef;
         IsInitialized: Boolean;
         PostDocument: Boolean;
+        CreditedQtyExceedsSubscribedQtyErr: Label 'The usage data for Subscription %1 adds up to a quantity of %2, which credits more than the quantity of %3 that is currently subscribed.', Locked = true;
+        CreditNotSmallerThanFullPeriodTxt: Label 'The credit for the supplier charge period (%1) must be smaller than the amount charged for the whole billing period (%2).', Locked = true;
         CorrectedDocumentNo: Code[20];
         i: Integer;
         j: Integer;
@@ -1995,9 +1997,482 @@ codeunit 148153 "Usage Based Billing Test"
         UsageDataBilling.TestField("Billing Line Entry No.", 0);
     end;
 
+    [Test]
+    [HandlerFunctions('MessageHandler,ExchangeRateSelectionModalPageHandler')]
+    procedure CreditForSupplierChargePeriodIsProratedForVendorSubscriptionLine()
+    var
+        VendorSubscriptionLine: Record "Subscription Line";
+        VendorUsageDataBilling: Record "Usage Data Billing";
+        ChargeStartDate, ChargeEndDate, CreditStartDate, CreditEndDate : Date;
+        ExpectedCreditedCostAmount: Decimal;
+        FullPeriodCostAmount: Decimal;
+    begin
+        // [SCENARIO] A Subscription billed yearly in advance is cancelled after nine months. The supplier delivers usage
+        // data for the remaining three months with a negative quantity. The Subscription Line of the vendor must be
+        // credited for those three months only, not for the whole year.
+
+        // [GIVEN] A yearly Subscription with a customer and a vendor Subscription Line, both usage based
+        Initialize();
+        ChargeStartDate := CalcDate('<-CY>', WorkDate());
+        ChargeEndDate := CalcDate('<CY>', WorkDate());
+        CreditStartDate := CalcDate('<9M>', ChargeStartDate);
+        CreditEndDate := ChargeEndDate;
+        SetupYearlySubscriptionWithCustomerAndVendorLine(ChargeStartDate, 10);
+
+        // [GIVEN] Usage data for the whole year has been imported and processed
+        ProcessYearlyUsageDataImport(ChargeStartDate, ChargeEndDate, 10);
+        FilterUsageDataBillingOnUsageDataImport(VendorUsageDataBilling, UsageDataImport."Entry No.", "Service Partner"::Vendor);
+        VendorUsageDataBilling.CalcSums("Cost Amount");
+        FullPeriodCostAmount := VendorUsageDataBilling."Cost Amount";
+
+        // [THEN] Usage data covering a whole billing period is charged at the Unit Cost delivered by the supplier
+        Assert.AreEqual(Item."Unit Cost" * 10, FullPeriodCostAmount,
+            'The supplier Unit Cost must be charged unchanged when the usage data covers a whole billing period.');
+
+        // [WHEN] Usage data crediting the last three months is processed
+        GetSubscriptionLineForPartner(VendorSubscriptionLine, "Service Partner"::Vendor);
+        ExpectedCreditedCostAmount := -Round(VendorSubscriptionLine.UnitAmountForChargePeriod(Item."Unit Cost", VendorSubscriptionLine."Billing Rhythm", CreditStartDate, CreditEndDate) * 10, Currency."Amount Rounding Precision");
+        ProcessYearlyUsageDataImport(CreditStartDate, CreditEndDate, -10);
+
+        // [THEN] Only the supplier charge period is credited on the vendor side
+        FilterUsageDataBillingOnUsageDataImport(VendorUsageDataBilling, UsageDataImport."Entry No.", "Service Partner"::Vendor);
+        VendorUsageDataBilling.CalcSums("Cost Amount");
+        Assert.AreEqual(ExpectedCreditedCostAmount, VendorUsageDataBilling."Cost Amount", 'The Cost Amount credited to the vendor Subscription Line does not cover the supplier charge period.');
+
+        // [THEN] The credit is smaller than the amount charged for the whole year
+        Assert.IsTrue(Abs(VendorUsageDataBilling."Cost Amount") < Abs(FullPeriodCostAmount),
+            StrSubstNo(CreditNotSmallerThanFullPeriodTxt, VendorUsageDataBilling."Cost Amount", FullPeriodCostAmount));
+    end;
+
+    [Test]
+    [HandlerFunctions('MessageHandler,ExchangeRateSelectionModalPageHandler')]
+    procedure CreditForSupplierChargePeriodIsProratedForCustomerSubscriptionLine()
+    var
+        CustomerSubscriptionLine: Record "Subscription Line";
+        CustomerUsageDataBilling: Record "Usage Data Billing";
+        ChargeStartDate, ChargeEndDate, CreditStartDate, CreditEndDate : Date;
+        ExpectedCreditedAmount: Decimal;
+        FullPeriodAmount: Decimal;
+    begin
+        // [SCENARIO] The same cancellation must credit the customer for the three cancelled months only. Processing the
+        // credit must not be aborted: an abort rolls back everything written since the last COMMIT, which leaves the
+        // Usage Data Billing of this Subscription Line at the amount imported for the whole year.
+
+        // [GIVEN] A yearly Subscription with a customer and a vendor Subscription Line, both usage based
+        Initialize();
+        ChargeStartDate := CalcDate('<-CY>', WorkDate());
+        ChargeEndDate := CalcDate('<CY>', WorkDate());
+        CreditStartDate := CalcDate('<9M>', ChargeStartDate);
+        CreditEndDate := ChargeEndDate;
+        SetupYearlySubscriptionWithCustomerAndVendorLine(ChargeStartDate, 10);
+
+        // [GIVEN] Usage data for the whole year has been imported and processed
+        ProcessYearlyUsageDataImport(ChargeStartDate, ChargeEndDate, 10);
+        FilterUsageDataBillingOnUsageDataImport(CustomerUsageDataBilling, UsageDataImport."Entry No.", "Service Partner"::Customer);
+        CustomerUsageDataBilling.CalcSums(Amount);
+        FullPeriodAmount := CustomerUsageDataBilling.Amount;
+
+        // [WHEN] Usage data crediting the last three months is processed
+        GetSubscriptionLineForPartner(CustomerSubscriptionLine, "Service Partner"::Customer);
+        ExpectedCreditedAmount := -Round(CustomerSubscriptionLine.UnitPriceForPeriod(CreditStartDate, CreditEndDate) * 10, Currency."Unit-Amount Rounding Precision");
+        ProcessYearlyUsageDataImport(CreditStartDate, CreditEndDate, -10);
+
+        // [THEN] Only the supplier charge period is credited on the customer side
+        FilterUsageDataBillingOnUsageDataImport(CustomerUsageDataBilling, UsageDataImport."Entry No.", "Service Partner"::Customer);
+        CustomerUsageDataBilling.CalcSums(Amount);
+        Assert.AreEqual(ExpectedCreditedAmount, CustomerUsageDataBilling.Amount, 'The Amount credited to the customer Subscription Line does not cover the supplier charge period.');
+
+        // [THEN] The credit is smaller than the amount charged for the whole year
+        Assert.IsTrue(Abs(CustomerUsageDataBilling.Amount) < Abs(FullPeriodAmount),
+            StrSubstNo(CreditNotSmallerThanFullPeriodTxt, CustomerUsageDataBilling.Amount, FullPeriodAmount));
+    end;
+
+    [Test]
+    [HandlerFunctions('MessageHandler,ExchangeRateSelectionModalPageHandler')]
+    procedure CreditCoveredBySubscribedQuantityIsProcessedWithoutError()
+    var
+        ChargeStartDate, ChargeEndDate, CreditStartDate, CreditEndDate : Date;
+    begin
+        // [SCENARIO] Crediting a quantity that is covered by the quantity currently subscribed is legitimate and must
+        // neither be reported nor stop the processing. The Subscription keeps the quantity it is subscribed with.
+
+        // [GIVEN] A yearly Subscription with a quantity of 10, billed from usage data for the whole year
+        Initialize();
+        ChargeStartDate := CalcDate('<-CY>', WorkDate());
+        ChargeEndDate := CalcDate('<CY>', WorkDate());
+        CreditStartDate := CalcDate('<9M>', ChargeStartDate);
+        CreditEndDate := ChargeEndDate;
+        SetupYearlySubscriptionWithCustomerAndVendorLine(ChargeStartDate, 10);
+        ProcessYearlyUsageDataImport(ChargeStartDate, ChargeEndDate, 10);
+
+        // [WHEN] Usage data crediting the full subscribed quantity is processed
+        // [THEN] Processing succeeds - crediting a covered quantity is not reported
+        ProcessYearlyUsageDataImport(CreditStartDate, CreditEndDate, -10);
+
+        // [THEN] The Subscription keeps its quantity - a credit does not state a new subscribed quantity
+        ServiceObject.Get(ServiceObject."No.");
+        Assert.AreEqual(10, ServiceObject.Quantity, 'The credit must not change the quantity of the Subscription.');
+    end;
+
+    [Test]
+    [HandlerFunctions('MessageHandler,ExchangeRateSelectionModalPageHandler')]
+    procedure CreditExceedingSubscribedQuantityIsReported()
+    var
+        ProcessUsageDataBilling: Codeunit "Process Usage Data Billing";
+        ChargeStartDate, ChargeEndDate, CreditStartDate, CreditEndDate : Date;
+    begin
+        // [SCENARIO] Crediting more than the quantity currently subscribed is not covered by what was delivered and
+        // must be reported - stating what is actually wrong instead of a plain negative quantity.
+
+        // [GIVEN] A yearly Subscription with a quantity of 10, billed from usage data for the whole year
+        Initialize();
+        ChargeStartDate := CalcDate('<-CY>', WorkDate());
+        ChargeEndDate := CalcDate('<CY>', WorkDate());
+        CreditStartDate := CalcDate('<9M>', ChargeStartDate);
+        CreditEndDate := ChargeEndDate;
+        SetupYearlySubscriptionWithCustomerAndVendorLine(ChargeStartDate, 10);
+        ProcessYearlyUsageDataImport(ChargeStartDate, ChargeEndDate, 10);
+
+        // [WHEN] Usage data crediting more than the subscribed quantity is processed
+        CreateYearlyUsageDataBilling(CreditStartDate, CreditEndDate, -15);
+        asserterror ProcessUsageDataBilling.Run(UsageDataImport);
+
+        // [THEN] The credit is reported as exceeding the subscribed quantity
+        Assert.ExpectedError(StrSubstNo(CreditedQtyExceedsSubscribedQtyErr, ServiceObject."No.", -15, 10));
+    end;
+
+    [Test]
+    [HandlerFunctions('MessageHandler,ExchangeRateSelectionModalPageHandler')]
+    procedure CreditExceedingSubscribedQuantityIsReportedForRebilling()
+    var
+        UsageDataBillingMetadata: Record "Usage Data Billing Metadata";
+        ProcessUsageDataBilling: Codeunit "Process Usage Data Billing";
+        ChargeStartDate, ChargeEndDate, CreditStartDate, CreditEndDate : Date;
+    begin
+        // [SCENARIO] Once the first delivery is invoiced, a credit for the same charge end date is rebilling, and the
+        // subscribed quantity is added back to the delivered quantity. That correction is our own bookkeeping and
+        // must not turn a credit that exceeds the subscription into one that looks covered.
+
+        // [GIVEN] A yearly Subscription with a quantity of 10, whose usage data for the whole year is invoiced
+        Initialize();
+        ChargeStartDate := CalcDate('<-CY>', WorkDate());
+        ChargeEndDate := CalcDate('<CY>', WorkDate());
+        CreditStartDate := CalcDate('<9M>', ChargeStartDate);
+        CreditEndDate := ChargeEndDate;
+        SetupYearlySubscriptionWithCustomerAndVendorLine(ChargeStartDate, 10);
+        ProcessYearlyUsageDataImport(ChargeStartDate, ChargeEndDate, 10);
+
+        UsageDataBillingMetadata.SetRange("Subscription No.", ServiceObject."No.");
+        UsageDataBillingMetadata.FindSet();
+        repeat
+            UsageDataBillingMetadata.Invoiced := true;
+            UsageDataBillingMetadata.Modify(false);
+        until UsageDataBillingMetadata.Next() = 0;
+
+        // [WHEN] Usage data crediting 15 of the 10 subscribed is processed as rebilling
+        CreateYearlyUsageDataBilling(CreditStartDate, CreditEndDate, -15);
+        asserterror ProcessUsageDataBilling.Run(UsageDataImport);
+
+        // [THEN] The credit is reported on the delivered quantity, not on the rebilling-corrected one
+        Assert.ExpectedError(StrSubstNo(CreditedQtyExceedsSubscribedQtyErr, ServiceObject."No.", -15, 10));
+    end;
+
+    [Test]
+    [HandlerFunctions('MessageHandler,ExchangeRateSelectionModalPageHandler')]
+    procedure DeliveryAndCreditCancellingOutInOneImportIsProcessed()
+    var
+        VendorSubscriptionLine: Record "Subscription Line";
+        PriceBeforeProcessing: Decimal;
+        UnitCostBeforeProcessing: Decimal;
+        ChargeStartDate: Date;
+        ChargeEndDate: Date;
+    begin
+        // [SCENARIO] A delivery and its credit in the same file add up to a quantity of zero. That must not divide by
+        // zero, and since nothing was charged in total, the Subscription Line keeps the amounts it had.
+
+        // [GIVEN] A yearly Subscription with a quantity of 10, billed from usage data for the whole year
+        Initialize();
+        ChargeStartDate := CalcDate('<-CY>', WorkDate());
+        ChargeEndDate := CalcDate('<CY>', WorkDate());
+        SetupYearlySubscriptionWithCustomerAndVendorLine(ChargeStartDate, 10);
+        ProcessYearlyUsageDataImport(ChargeStartDate, ChargeEndDate, 10);
+
+        GetSubscriptionLineForPartner(VendorSubscriptionLine, "Service Partner"::Vendor);
+        PriceBeforeProcessing := VendorSubscriptionLine.Price;
+        UnitCostBeforeProcessing := VendorSubscriptionLine."Unit Cost";
+
+        // [WHEN] One import delivers 10 and credits 10 for the same charge period
+        // [THEN] Processing succeeds
+        ProcessYearlyUsageDataImportWithTwoLines(ChargeStartDate, ChargeEndDate, 10, -10);
+
+        // [THEN] The Subscription keeps its quantity and the Subscription Line keeps its amounts
+        ServiceObject.Get(ServiceObject."No.");
+        Assert.AreEqual(10, ServiceObject.Quantity, 'A delivery and its credit cancelling out must not change the quantity of the Subscription.');
+        GetSubscriptionLineForPartner(VendorSubscriptionLine, "Service Partner"::Vendor);
+        Assert.AreEqual(PriceBeforeProcessing, VendorSubscriptionLine.Price, 'A delivery and its credit cancelling out must not change the Price of the Subscription Line.');
+        Assert.AreEqual(UnitCostBeforeProcessing, VendorSubscriptionLine."Unit Cost", 'A delivery and its credit cancelling out must not change the Unit Cost of the Subscription Line.');
+    end;
+
+    [Test]
+    procedure ImportedUnitCostIsScaledByBillingRhythmNotByBillingBasePeriod()
+    var
+        BillingBasePeriod: DateFormula;
+        BillingRhythm: DateFormula;
+        ChargeEndDate: Date;
+        ChargeStartDate: Date;
+        SupplierUnitCost: Decimal;
+    begin
+        // [SCENARIO] The supplier states its Unit Cost for one billing period, while Price and Unit Cost of the
+        // Subscription Line are stated per Billing Base Period. Usage data covering exactly one billing period must
+        // therefore be passed on unchanged, whatever the two periods are.
+        Initialize();
+        SupplierUnitCost := LibraryRandom.RandDec(1000, 2);
+
+        // [GIVEN] A Subscription Line priced per year but billed monthly
+        Evaluate(BillingBasePeriod, '1Y');
+        Evaluate(BillingRhythm, '1M');
+        MockServiceCommitment(ServiceCommitment, BillingBasePeriod, BillingRhythm, LibraryRandom.RandDec(1000, 2));
+
+        // [WHEN] Usage data covers exactly one month
+        // [THEN] The supplier Unit Cost is unchanged
+        ChargeStartDate := CalcDate('<-CM>', WorkDate());
+        ChargeEndDate := CalcDate('<CM>', WorkDate());
+        Assert.AreEqual(SupplierUnitCost, ServiceCommitment.UnitAmountForChargePeriod(SupplierUnitCost, ServiceCommitment."Billing Rhythm", ChargeStartDate, ChargeEndDate),
+            'Usage data covering one billing period must keep the Unit Cost delivered by the supplier.');
+
+        // [GIVEN] A Subscription Line priced per month but billed yearly
+        Evaluate(BillingBasePeriod, '1M');
+        Evaluate(BillingRhythm, '1Y');
+        MockServiceCommitment(ServiceCommitment, BillingBasePeriod, BillingRhythm, LibraryRandom.RandDec(1000, 2));
+
+        // [WHEN] Usage data covers exactly one year
+        // [THEN] The supplier Unit Cost is unchanged here as well
+        ChargeStartDate := CalcDate('<-CY>', WorkDate());
+        ChargeEndDate := CalcDate('<CY>', WorkDate());
+        Assert.AreEqual(SupplierUnitCost, ServiceCommitment.UnitAmountForChargePeriod(SupplierUnitCost, ServiceCommitment."Billing Rhythm", ChargeStartDate, ChargeEndDate),
+            'Usage data covering one billing period must keep the Unit Cost delivered by the supplier.');
+
+        // [WHEN] Usage data covers half of a billing period
+        // [THEN] Half of the supplier Unit Cost is passed on
+        ChargeEndDate := CalcDate('<-1D>', CalcDate('<6M>', ChargeStartDate));
+        Assert.IsTrue(ServiceCommitment.UnitAmountForChargePeriod(SupplierUnitCost, ServiceCommitment."Billing Rhythm", ChargeStartDate, ChargeEndDate) < SupplierUnitCost,
+            'Usage data covering part of a billing period must pass on less than the Unit Cost delivered by the supplier.');
+    end;
+
+    [Test]
+    [HandlerFunctions('MessageHandler,ExchangeRateSelectionModalPageHandler')]
+    procedure ProcessingUsageDataBillingTwiceKeepsTheSameCost()
+    var
+        VendorUsageDataBilling: Record "Usage Data Billing";
+        ProcessUsageDataBilling: Codeunit "Process Usage Data Billing";
+        CostAmountAfterFirstRun: Decimal;
+        ChargeStartDate, ChargeEndDate, PartialStartDate, PartialEndDate : Date;
+    begin
+        // [SCENARIO] Processing the usage data billing of an import a second time - which the user can do at any time
+        // before the documents are created - must arrive at the same cost, not scale the already scaled cost again.
+
+        // [GIVEN] Usage data covering only part of a billing period has been processed
+        Initialize();
+        ChargeStartDate := CalcDate('<-CY>', WorkDate());
+        ChargeEndDate := CalcDate('<CY>', WorkDate());
+        PartialStartDate := CalcDate('<9M>', ChargeStartDate);
+        PartialEndDate := ChargeEndDate;
+        SetupYearlySubscriptionWithCustomerAndVendorLine(ChargeStartDate, 10);
+        ProcessYearlyUsageDataImport(PartialStartDate, PartialEndDate, 10);
+
+        FilterUsageDataBillingOnUsageDataImport(VendorUsageDataBilling, UsageDataImport."Entry No.", "Service Partner"::Vendor);
+        VendorUsageDataBilling.CalcSums("Cost Amount");
+        CostAmountAfterFirstRun := VendorUsageDataBilling."Cost Amount";
+
+        // [WHEN] The same import is processed again
+        ProcessUsageDataBilling.Run(UsageDataImport);
+
+        // [THEN] The vendor Cost Amount is unchanged
+        FilterUsageDataBillingOnUsageDataImport(VendorUsageDataBilling, UsageDataImport."Entry No.", "Service Partner"::Vendor);
+        VendorUsageDataBilling.CalcSums("Cost Amount");
+        Assert.AreEqual(CostAmountAfterFirstRun, VendorUsageDataBilling."Cost Amount",
+            'Processing the usage data billing again must not change the Cost Amount of the vendor Subscription Line.');
+    end;
+
+    [Test]
+    [HandlerFunctions('MessageHandler,ExchangeRateSelectionModalPageHandler')]
+    procedure SupplierChargePeriodIsHonouredForUnitCostSurcharge()
+    var
+        CustomerSubscriptionLine: Record "Subscription Line";
+        VendorSubscriptionLine: Record "Subscription Line";
+        CustomerUsageDataBilling: Record "Usage Data Billing";
+        VendorUsageDataBilling: Record "Usage Data Billing";
+        ChargeStartDate, ChargeEndDate, PartialStartDate, PartialEndDate : Date;
+        ExpectedUnitCost: Decimal;
+        SurchargePct: Decimal;
+    begin
+        // [SCENARIO] The supplier states its Unit Cost for a whole billing period for every pricing option, so a
+        // charge period of three months must be scaled for "Unit Cost Surcharge" as well - on the vendor side, and
+        // on the customer side where the surcharge is put on top of it.
+
+        // [GIVEN] A yearly Subscription with a customer and a vendor Subscription Line priced by unit cost surcharge
+        Initialize();
+        ChargeStartDate := CalcDate('<-CY>', WorkDate());
+        ChargeEndDate := CalcDate('<CY>', WorkDate());
+        PartialStartDate := CalcDate('<9M>', ChargeStartDate);
+        PartialEndDate := ChargeEndDate;
+        SetupYearlySubscriptionWithCustomerAndVendorLine(ChargeStartDate, 10);
+
+        SurchargePct := LibraryRandom.RandDec(50, 2);
+        ServiceCommitment.Reset();
+        ServiceCommitment.SetRange("Subscription Header No.", ServiceObject."No.");
+        ServiceCommitment.FindSet();
+        repeat
+            ServiceCommitment."Pricing Unit Cost Surcharge %" := SurchargePct;
+            ServiceCommitment.Modify(false);
+        until ServiceCommitment.Next() = 0;
+
+        // [WHEN] Usage data covering only the last three months is processed
+        ProcessYearlyUsageDataImport(PartialStartDate, PartialEndDate, 10, "Usage Based Pricing"::"Unit Cost Surcharge");
+
+        // The billing rhythm is set to one year while the usage data is prepared, so the expected share of the
+        // period is taken from the Subscription Line as it stands once the import has been processed.
+        GetSubscriptionLineForPartner(VendorSubscriptionLine, "Service Partner"::Vendor);
+        ExpectedUnitCost := VendorSubscriptionLine.UnitAmountForChargePeriod(Item."Unit Cost", VendorSubscriptionLine."Billing Rhythm", PartialStartDate, PartialEndDate);
+
+        // [THEN] The vendor is charged the supplier cost for those three months only
+        FilterUsageDataBillingOnUsageDataImport(VendorUsageDataBilling, UsageDataImport."Entry No.", "Service Partner"::Vendor);
+        VendorUsageDataBilling.CalcSums("Cost Amount");
+        Assert.AreEqual(Round(ExpectedUnitCost * 10, Currency."Amount Rounding Precision"), VendorUsageDataBilling."Cost Amount",
+            'The vendor Cost Amount does not cover the supplier charge period for Unit Cost Surcharge.');
+        Assert.IsTrue(VendorUsageDataBilling."Cost Amount" < Item."Unit Cost" * 10,
+            StrSubstNo(CreditNotSmallerThanFullPeriodTxt, VendorUsageDataBilling."Cost Amount", Item."Unit Cost" * 10));
+
+        // [THEN] The customer price is that same period cost plus the surcharge
+        GetSubscriptionLineForPartner(CustomerSubscriptionLine, "Service Partner"::Customer);
+        FilterUsageDataBillingOnUsageDataImport(CustomerUsageDataBilling, UsageDataImport."Entry No.", "Service Partner"::Customer);
+        CustomerUsageDataBilling.CalcSums(Amount);
+        Assert.AreEqual(Round(ExpectedUnitCost * (1 + SurchargePct / 100) * 10, Currency."Unit-Amount Rounding Precision"), CustomerUsageDataBilling.Amount,
+            'The customer Amount does not cover the supplier charge period for Unit Cost Surcharge.');
+    end;
+
     #endregion Tests
 
     #region Procedures
+
+    local procedure SetupYearlySubscriptionWithCustomerAndVendorLine(SubscriptionStartDate: Date; SubscriptionQuantity: Decimal)
+    begin
+        ContractTestLibrary.CreateCustomer(Customer);
+        ContractTestLibrary.CreateItemWithServiceCommitmentOption(Item, Enum::"Item Service Commitment Type"::"Service Commitment Item");
+        Item."Unit Price" := LibraryRandom.RandDec(1000, 2);
+        Item."Unit Cost" := LibraryRandom.RandDec(1000, 2);
+        Item.Modify(false);
+        SetupItemWithMultipleServiceCommitmentPackages();
+        ContractTestLibrary.CreateServiceObjectForItem(ServiceObject, Item."No.");
+        // Both fields are assigned rather than validated: no Subscription Line exists yet, and validating either of
+        // them runs RecalculateServiceCommitments - "End-User Customer No." reaches it through "Bill-to Customer No."
+        // - which asks for confirmation and cannot be answered from a fixture.
+        ServiceObject.Quantity := SubscriptionQuantity;
+        ServiceObject."End-User Customer No." := Customer."No.";
+        ServiceObject.Modify(false);
+        ServiceObject.InsertServiceCommitmentsFromStandardServCommPackages(SubscriptionStartDate);
+
+        // The usage data is only accepted for a Subscription Line that already runs when the charge period starts.
+        ServiceCommitment.Reset();
+        ServiceCommitment.SetRange("Subscription Header No.", ServiceObject."No.");
+        ServiceCommitment.FindSet();
+        repeat
+            ServiceCommitment.Validate("Subscription Line Start Date", SubscriptionStartDate);
+            ServiceCommitment.Modify(false);
+        until ServiceCommitment.Next() = 0;
+
+        CreateCustomerContractAndAssignServiceCommitments();
+        CreateVendorContractAndAssignServiceCommitments();
+    end;
+
+    local procedure GetUsageDataBillingCount(UsageDataImportEntryNo: Integer): Integer
+    var
+        UsageDataBilling: Record "Usage Data Billing";
+    begin
+        UsageDataBilling.Reset();
+        UsageDataBilling.SetRange("Usage Data Import Entry No.", UsageDataImportEntryNo);
+        exit(UsageDataBilling.Count());
+    end;
+
+    local procedure GetSubscriptionLineForPartner(var SubscriptionLine: Record "Subscription Line"; ServicePartner: Enum "Service Partner")
+    begin
+        SubscriptionLine.Reset();
+        SubscriptionLine.SetRange("Subscription Header No.", ServiceObject."No.");
+        SubscriptionLine.SetRange(Partner, ServicePartner);
+        SubscriptionLine.FindFirst();
+    end;
+
+    local procedure CreateYearlyUsageDataBilling(ChargeStartDate: Date; ChargeEndDate: Date; Quantity: Decimal)
+    begin
+        CreateYearlyUsageDataBilling(ChargeStartDate, ChargeEndDate, Quantity, 0, "Usage Based Pricing"::"Usage Quantity");
+    end;
+
+    local procedure CreateYearlyUsageDataBilling(ChargeStartDate: Date; ChargeEndDate: Date; Quantity: Decimal; SecondQuantity: Decimal; UsageBasedPricing: Enum "Usage Based Pricing")
+    var
+        UsageDataGenericImport: Record "Usage Data Generic Import";
+        SecondUsageDataGenericImport: Record "Usage Data Generic Import";
+    begin
+        UsageDataImport.Reset();
+        UsageBasedBTestLibrary.CreateUsageDataSupplier(UsageDataSupplier, Enum::"Usage Data Supplier Type"::Generic, false, Enum::"Vendor Invoice Per"::Import);
+        UsageBasedBTestLibrary.CreateGenericImportSettings(GenericImportSettings, UsageDataSupplier."No.", true, true);
+        UsageBasedBTestLibrary.CreateUsageDataImport(UsageDataImport, UsageDataSupplier."No.");
+        UsageBasedBTestLibrary.CreateSimpleUsageDataGenericImport(UsageDataGenericImport, UsageDataImport."Entry No.", ServiceObject."No.", Customer."No.", Item."Unit Cost", ChargeStartDate, ChargeEndDate, ChargeStartDate, ChargeEndDate, Quantity);
+        if SecondQuantity <> 0 then begin
+            // A second line in the same file for the same subscription and the same charge period - the supplier
+            // reference has to stay identical, so the first line is copied instead of created from scratch.
+            SecondUsageDataGenericImport := UsageDataGenericImport;
+            SecondUsageDataGenericImport."Entry No." := 0;
+            SecondUsageDataGenericImport.Quantity := SecondQuantity;
+            SecondUsageDataGenericImport."Cost Amount" := SecondUsageDataGenericImport.Cost * SecondQuantity;
+            SecondUsageDataGenericImport.Insert(false);
+        end;
+        ProcessUsageDataImport(Enum::"Processing Step"::"Process Imported Lines");
+        UsageDataGenericImport.SetRange("Usage Data Import Entry No.", UsageDataImport."Entry No.");
+        UsageDataGenericImport.FindFirst();
+        PrepareServiceCommitmentAndUsageDataGenericImportForUsageBilling(UsageDataGenericImport, UsageBasedPricing, '1Y', '1Y');
+        Codeunit.Run(Codeunit::"Import And Process Usage Data", UsageDataImport);
+
+        UsageDataImport.SetRecFilter();
+        UsageDataImport.ProcessUsageDataImport(UsageDataImport, Enum::"Processing Step"::"Create Usage Data Billing");
+        if GetUsageDataBillingCount(UsageDataImport."Entry No.") = 0 then begin
+            // The first pass only links the Subscription to the supplier reference and leaves the imported line in
+            // status Error, which makes "Create Usage Data Billing" skip it. Processing the imported lines once more
+            // brings the line to status Ok - refer to AB2070.
+            UsageDataImport.ProcessUsageDataImport(UsageDataImport, Enum::"Processing Step"::"Process Imported Lines");
+            UsageDataImport.ProcessUsageDataImport(UsageDataImport, Enum::"Processing Step"::"Create Usage Data Billing");
+        end;
+        UsageDataImport."Processing Step" := Enum::"Processing Step"::"Process Usage Data Billing";
+        UsageDataImport.Modify(false);
+    end;
+
+    local procedure ProcessYearlyUsageDataImport(ChargeStartDate: Date; ChargeEndDate: Date; Quantity: Decimal)
+    begin
+        ProcessYearlyUsageDataImport(ChargeStartDate, ChargeEndDate, Quantity, "Usage Based Pricing"::"Usage Quantity");
+    end;
+
+    local procedure ProcessYearlyUsageDataImport(ChargeStartDate: Date; ChargeEndDate: Date; Quantity: Decimal; UsageBasedPricing: Enum "Usage Based Pricing")
+    var
+        ProcessUsageDataBilling: Codeunit "Process Usage Data Billing";
+        UsageDataImportEntryNo: Integer;
+    begin
+        CreateYearlyUsageDataBilling(ChargeStartDate, ChargeEndDate, Quantity, 0, UsageBasedPricing);
+        UsageDataImportEntryNo := UsageDataImport."Entry No.";
+        ProcessUsageDataBilling.Run(UsageDataImport);
+        UsageDataImport.Reset();
+        UsageDataImport.Get(UsageDataImportEntryNo);
+    end;
+
+    local procedure ProcessYearlyUsageDataImportWithTwoLines(ChargeStartDate: Date; ChargeEndDate: Date; Quantity: Decimal; SecondQuantity: Decimal)
+    var
+        ProcessUsageDataBilling: Codeunit "Process Usage Data Billing";
+        UsageDataImportEntryNo: Integer;
+    begin
+        CreateYearlyUsageDataBilling(ChargeStartDate, ChargeEndDate, Quantity, SecondQuantity, "Usage Based Pricing"::"Usage Quantity");
+        UsageDataImportEntryNo := UsageDataImport."Entry No.";
+        ProcessUsageDataBilling.Run(UsageDataImport);
+        UsageDataImport.Reset();
+        UsageDataImport.Get(UsageDataImportEntryNo);
+    end;
 
     local procedure Initialize()
     begin
