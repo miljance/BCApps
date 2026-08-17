@@ -18,9 +18,11 @@ codeunit 8026 "Process Usage Data Billing"
         ProcessServiceCommitmentProcedureNameLbl: Label 'ProcessServiceCommitment', Locked = true;
         UsageBasedPricingOptionNotImplementedErr: Label 'Unknown option %1 for %2.\\Object Type: %3 Object Name: %4, Procedure: %5', Comment = '%1=Format("Calculation Base Type"), %2 = Fieldcaption for "Calculation Base Type", %3 = Object Type, %4 = Object Name, %5 = Procedure Name';
         CalculateCustomerUsageDataBillingPriceProcedureNameLbl: Label 'CalculateCustomerUsageDataBillingPrice', Locked = true;
+        CalculateVendorUsageDataBillingPriceProcedureNameLbl: Label 'CalculateVendorUsageDataBillingPrice', Locked = true;
         CodeunitObjectLbl: Label 'Codeunit', Locked = true;
         CurrentCodeunitNameLbl: Label 'Process Usage Data Billing', Locked = true;
         NoContractFoundInUsageDataBillingErr: Label 'No contract (for Subscription %1) found for processing step %2.', Comment = '%1=Subscription Header No., %2=Processing Step';
+        CreditedQtyExceedsSubscribedQtyErr: Label 'The usage data for Subscription %1 adds up to a quantity of %2, which credits more than the quantity of %3 that is currently subscribed.', Comment = '%1=Subscription Header No., %2=Total quantity of the usage data, %3=Quantity of the Subscription';
 
     trigger OnRun()
     begin
@@ -46,14 +48,16 @@ codeunit 8026 "Process Usage Data Billing"
         UsageDataBilling.SetFilter("Subscription Contract No.", '<>%1', '');
         if not UsageDataBilling.IsEmpty then begin
             UsageDataBilling.ExcludeProcessingStatusError();
-
-            UsageDataBilling.SetRange(Partner, "Service Partner"::Customer);
             if UsageDataBilling.FindSet(true) then
                 repeat
-                    CalculateCustomerUsageDataBillingPrice(UsageDataBilling);
+                    case UsageDataBilling.Partner of
+                        "Service Partner"::Customer:
+                            CalculateCustomerUsageDataBillingPrice(UsageDataBilling);
+                        "Service Partner"::Vendor:
+                            CalculateVendorUsageDataBillingPrice(UsageDataBilling);
+                    end;
                 until UsageDataBilling.Next() = 0;
 
-            UsageDataBilling.SetRange(Partner);
             this.ProgressTracker.StartActivity(ProcessBillingLbl, UsageDataBilling.Count());
             DetailText := StrSubstNo(ImportEntryDetailLbl, UsageDataImport."Entry No.");
             if UsageDataBilling.FindSet() then
@@ -141,8 +145,9 @@ codeunit 8026 "Process Usage Data Billing"
                     end;
                 "Usage Based Pricing"::"Unit Cost Surcharge":
                     begin
-                        UnitPrice := UsageDataBilling."Unit Cost" * (1 + UsageDataBilling."Pricing Unit Cost Surcharge %" / 100);
-                        Amount := UnitPrice * UsageDataBilling.Quantity;
+                        UnitPrice := ServiceCommitment.UnitAmountForChargePeriod(UsageDataBilling."Unit Cost", ServiceCommitment."Billing Rhythm", UsageDataBilling."Charge Start Date", UsageDataBilling."Charge End Date");
+                        UnitPrice := UnitPrice * (1 + UsageDataBilling."Pricing Unit Cost Surcharge %" / 100);
+                        Amount := UnitPrice * Abs(UsageDataBilling.Quantity);
                     end;
                 else begin
                     IsHandled := false;
@@ -163,6 +168,50 @@ codeunit 8026 "Process Usage Data Billing"
                 UsageDataBilling.Amount *= -1;
             UsageDataBilling.Modify(true);
         end;
+    end;
+
+    local procedure CalculateVendorUsageDataBillingPrice(var UsageDataBilling: Record "Usage Data Billing")
+    var
+        Currency: Record Currency;
+        VendorContract: Record "Vendor Subscription Contract";
+        VendorContractLine: Record "Vend. Sub. Contract Line";
+        ServiceCommitment: Record "Subscription Line";
+        IsHandled: Boolean;
+        CostAmount: Decimal;
+        UnitCost: Decimal;
+    begin
+        if not UsageDataBilling.IsPartnerVendor() then
+            exit;
+        if not GetVendorContractData(VendorContract, VendorContractLine, ServiceCommitment, UsageDataBilling) then
+            exit;
+
+        case UsageDataBilling."Usage Base Pricing" of
+            "Usage Based Pricing"::"Usage Quantity",
+            "Usage Based Pricing"::"Unit Cost Surcharge":
+                CalculateUsageDataCosts(CostAmount, UnitCost, ServiceCommitment, UsageDataBilling, Abs(UsageDataBilling.Quantity));
+            "Usage Based Pricing"::"Fixed Quantity":
+                begin
+                    ServiceCommitment.CalcFields("Quantity");
+                    CalculateUsageDataCosts(CostAmount, UnitCost, ServiceCommitment, UsageDataBilling, ServiceCommitment."Quantity");
+                end;
+            else begin
+                IsHandled := false;
+                OnUsageBasedPricingElseCaseOnCalculateVendorUsageDataBillingPrice(UnitCost, CostAmount, UsageDataBilling, VendorContract, IsHandled);
+                if not IsHandled then
+                    Error(UsageBasedPricingOptionNotImplementedErr, Format(ServiceCommitment."Usage Based Pricing"), ServiceCommitment.FieldCaption("Usage Based Pricing"), CodeunitObjectLbl,
+                                                                    CurrentCodeunitNameLbl, CalculateVendorUsageDataBillingPriceProcedureNameLbl);
+            end;
+        end;
+
+        SetCurrency(Currency, UsageDataBilling."Currency Code");
+        CostAmount := Round(CostAmount, Currency."Amount Rounding Precision");
+        if UsageDataBilling.Quantity < 0 then
+            CostAmount *= -1;
+
+        if UsageDataBilling."Cost Amount" = CostAmount then
+            exit;
+        UsageDataBilling."Cost Amount" := CostAmount;
+        UsageDataBilling.Modify(true);
     end;
 
     local procedure ProcessServiceCommitment(var UsageDataBilling: Record "Usage Data Billing")
@@ -199,6 +248,7 @@ codeunit 8026 "Process Usage Data Billing"
             "Usage Based Pricing"::"Usage Quantity":
                 begin
                     CalculateSumsFromUsageDataBilling(LastUsageDataBilling, UsageDataImport."Entry No.", ServiceCommitment, TotalQuantity, TotalAmount, TotalCostAmount);
+                    CheckCreditedQuantityIsCovered(ServiceObject, NewServiceObjectQuantity);
                     NewServiceObjectQuantity := TotalQuantity;
                     if NewServiceObjectQuantity <> 0 then begin
                         UnitCost := TotalCostAmount / NewServiceObjectQuantity;
@@ -262,6 +312,15 @@ codeunit 8026 "Process Usage Data Billing"
         TotalCostAmount := UsageDataBilling."Cost Amount";
     end;
 
+    local procedure CheckCreditedQuantityIsCovered(ServiceObject: Record "Subscription Header"; UsageQuantity: Decimal)
+    begin
+        if UsageQuantity >= 0 then
+            exit;
+        if Abs(UsageQuantity) <= ServiceObject.Quantity then
+            exit;
+        Error(CreditedQtyExceedsSubscribedQtyErr, ServiceObject."No.", UsageQuantity, ServiceObject.Quantity);
+    end;
+
     local procedure UpdateServiceObjectQuantity(ServiceObjectNo: Code[20]; NewQuantity: Decimal)
     var
         ServiceObject: Record "Subscription Header";
@@ -269,6 +328,8 @@ codeunit 8026 "Process Usage Data Billing"
         if not ServiceObject.Get(ServiceObjectNo) then
             exit;
         if (ServiceObject.Quantity = NewQuantity) then
+            exit;
+        if NewQuantity <= 0 then
             exit;
         ServiceObject.SetHideValidationDialog(true);
         ServiceObject.Validate(Quantity, NewQuantity);
@@ -328,6 +389,13 @@ codeunit 8026 "Process Usage Data Billing"
         CustomerContractLine.GetServiceCommitment(ServiceCommitment);
     end;
 
+    local procedure GetVendorContractData(var VendorContract: Record "Vendor Subscription Contract"; var VendorContractLine: Record "Vend. Sub. Contract Line"; var ServiceCommitment: Record "Subscription Line"; UsageDataBilling: Record "Usage Data Billing"): Boolean
+    begin
+        VendorContract.Get(UsageDataBilling."Subscription Contract No.");
+        VendorContractLine.Get(UsageDataBilling."Subscription Contract No.", UsageDataBilling."Subscription Contract Line No.");
+        exit(VendorContractLine.GetServiceCommitment(ServiceCommitment));
+    end;
+
     local procedure SetCurrency(var Currency: Record Currency; CurrencyCode: Code[10])
     begin
         if CurrencyCode <> '' then
@@ -347,6 +415,17 @@ codeunit 8026 "Process Usage Data Billing"
         UsageDataBilling.ExcludeProcessingStatusError();
         if UsageDataBilling.FindFirst() then
             FoundUsageDataBilling := UsageDataBilling;
+    end;
+
+    local procedure CalculateUsageDataCosts(var CostAmount: Decimal; var UnitCost: Decimal; ServiceCommitment: Record "Subscription Line"; var UsageDataBilling: Record "Usage Data Billing"; Quantity: Decimal)
+    begin
+        if Quantity = 0 then begin
+            UnitCost := UsageDataBilling."Unit Cost";
+            CostAmount := UsageDataBilling."Cost Amount";
+            exit;
+        end;
+        UnitCost := ServiceCommitment.UnitAmountForChargePeriod(UsageDataBilling."Unit Cost", ServiceCommitment."Billing Rhythm", UsageDataBilling."Charge Start Date", UsageDataBilling."Charge End Date");
+        CostAmount := UnitCost * Quantity;
     end;
 
     local procedure CalculateUsageDataPrices(var Amount: Decimal; var UnitPrice: Decimal; ServiceCommitment: Record "Subscription Line"; var UsageDataBilling: Record "Usage Data Billing"; Quantity: Decimal)
@@ -388,6 +467,11 @@ codeunit 8026 "Process Usage Data Billing"
 
     [IntegrationEvent(false, false)]
     local procedure OnUsageBasedPricingElseCaseOnCalculateCustomerUsageDataBillingPrice(var UnitPrice: Decimal; var Amount: Decimal; var UsageDataBilling: Record "Usage Data Billing"; CustomerSubscriptionContract: Record "Customer Subscription Contract"; var IsHandled: Boolean)
+    begin
+    end;
+
+    [IntegrationEvent(false, false)]
+    local procedure OnUsageBasedPricingElseCaseOnCalculateVendorUsageDataBillingPrice(var UnitCost: Decimal; var CostAmount: Decimal; var UsageDataBilling: Record "Usage Data Billing"; VendorSubscriptionContract: Record "Vendor Subscription Contract"; var IsHandled: Boolean)
     begin
     end;
 
